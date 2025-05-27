@@ -9,7 +9,7 @@ from langchain_ollama import ChatOllama
 
 PIPELINE_PROMPT = PromptTemplate.from_template(
     """
-You are a MongoDB expert.
+You are a MongoDB expert. 
 
 The collection is named "traffic_data" and each document has:
 - location (string): The name of the junction or intersection.
