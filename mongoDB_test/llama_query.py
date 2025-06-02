@@ -18,7 +18,7 @@ from toolbox import (
 def main():
     # 1. Ensure the user provided a question as the first CLI argument
     if len(sys.argv) < 2 or not sys.argv[1].strip():
-        print('Usage: python main_agent.py "Your question here"')
+        print('"Your question here"')
         sys.exit(1)
 
     question = sys.argv[1]
