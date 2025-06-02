@@ -1,81 +1,69 @@
-#!/usr/bin/env python3
 import sys
-import ast
-import json
-from pymongo import MongoClient
-from langchain.prompts import PromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from langchain_ollama import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+from langchain.agents import AgentExecutor, create_tool_calling_agent
 
-PIPELINE_PROMPT = PromptTemplate.from_template(
-    """
-You are a MongoDB expert. 
-
-The collection is named "traffic_data" and each document has:
-- location (string): The name of the junction or intersection.
-- timestamp (string)
-- count (integer): The number of vehicles recorded.
-
-INSTRUCTIONS:
-1.  **Count Vehicles Correctly**: To count vehicles, you MUST sum the "count" field (`{{"$sum": "$count"}}`). Do not count documents (`{{"$sum": 1}}`).
-2.  **Filter Locations Correctly**: Any filtering on location names (like "junction", "road", etc.) MUST be applied to the "location" field. The filter must be case-insensitive.
-    -   CORRECT   Example: `{{"$match": {{ "location": {{ "$regex": "some junction", "$options": "i" }} }} }}`
-    -   INCORRECT Example: `{{"$match": {{ "$regex": "some junction", "$options": "i" }} }}`
-
-Write **one** MongoDB aggregation pipeline (as a valid Python list of dicts) to answer the following question:
-
-QUESTION:
-{question}
-
-Output **only** the Python list—no extra text.
-"""
+# Import all tool functions from toolbox.py
+from toolbox import (
+    get_busiest_lanes_by_occupancy,
+    get_lanes_with_most_traffic,
+    get_total_vehicles_entered,
+    get_average_occupancy_by_hour,
+    get_average_speed_for_sensor,
+    get_sensors_with_highest_flow,
+    get_sensor_data_in_time_range,
+    get_peak_flow_time
 )
 
-def run_pipeline_and_print(uri: str, pipeline):
-    """
-    Connects to MongoDB, runs the aggregation pipeline, and prints the result.
-    """
-    try:
-        client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-        client.admin.command('ismaster')
-        coll   = client.traffic_db.traffic_data
-        result = list(coll.aggregate(pipeline))
-        client.close()
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-    except Exception as e:
-        print(f":( Failed to run pipeline: {e}")
-
-
-def ask_question(db_uri: str, question: str):
-    """
-    Uses an LLM to generate a MongoDB pipeline from a question,
-    then executes it.
-    """
-    llm   = ChatOllama(model="llama3.2", temperature=0.0)
-    chain = PIPELINE_PROMPT | llm | StrOutputParser()
-    
-    pipeline_str = chain.invoke({"question": question}).strip()
-
-    print(":) Generated Pipeline (Robust Logic):\n", pipeline_str)
-
-    try:
-        # The double braces in the prompt might confuse the LLM, so we clean the output
-        if pipeline_str.startswith("`") and pipeline_str.endswith("`"):
-            pipeline_str = pipeline_str.strip('`')
-        pipeline = ast.literal_eval(pipeline_str)
-        if not isinstance(pipeline, list):
-            raise ValueError("Pipeline is not a Python list")
-    except Exception as e:
-        print(":( Failed to parse pipeline:", e)
-        print("Raw LLM output:\n", pipeline_str)
-        return
-
-    run_pipeline_and_print(db_uri, pipeline)
-
-if __name__ == "__main__":
+def main():
+    # 1. Ensure the user provided a question as the first CLI argument
     if len(sys.argv) < 2 or not sys.argv[1].strip():
-        print('Usage: python query_mongo.py "Your question here"')
+        print('Usage: python main_agent.py "Your question here"')
         sys.exit(1)
 
-    MONGO_URI = "mongodb://localhost:27017/"
-    ask_question(MONGO_URI, sys.argv[1])
+    question = sys.argv[1]
+
+    # 2. Initialize Ollama LLM (e.g., qwen2.5) with zero temperature (deterministic)
+    llm = ChatOllama(model="qwen2.5", temperature=0.0)
+
+    # 3. Combine tools into a single list
+    tools = [
+        get_busiest_lanes_by_occupancy,
+        get_lanes_with_most_traffic,
+        get_total_vehicles_entered,
+        get_average_occupancy_by_hour,
+        get_average_speed_for_sensor,
+        get_sensors_with_highest_flow,
+        get_sensor_data_in_time_range,
+        get_peak_flow_time,
+    ]
+
+    # 4. Define the system prompt, telling the model how to choose tools
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        You are an expert traffic data assistant. You have access to tools that query two MongoDB databases:
+
+        1.  **traffic_db** (lane data). Use tools related to lanes, occupancy, and vehicle counts.
+        2.  **measurements_db** (sensor data). Use tools related to sensors, speed, and flow.
+
+        Depending on the user's question, choose exactly one tool and return a JSON function call.
+        """),
+        ("user", "{input}"),
+        ("placeholder", "{agent_scratchpad}"),
+    ])
+
+    # 5. Create the tool-calling agent and executor
+    agent = create_tool_calling_agent(llm, tools, prompt)
+    agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+
+    # 6. Invoke the agent with the question
+    print(f"🗣️ Asking question: {question}")
+    result = agent_executor.invoke({"input": question})
+
+    # 7. Print the final answer
+    print("\n✅ Final Answer:")
+    print(result["output"])
+
+
+if __name__ == "__main__":
+    main()
