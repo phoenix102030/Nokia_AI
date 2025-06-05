@@ -3,16 +3,7 @@ from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain.agents import AgentExecutor, create_tool_calling_agent
 
-from toolbox import (
-    get_busiest_lanes_by_occupancy,
-    get_lanes_with_most_traffic,
-    get_total_vehicles_entered,
-    get_average_occupancy_by_hour,
-    get_average_speed_for_sensor,
-    get_sensors_with_highest_flow,
-    get_sensor_data_in_time_range,
-    get_peak_flow_time
-)
+from toolbox import *
 
 def main():
     if len(sys.argv) < 2 or not sys.argv[1].strip():
