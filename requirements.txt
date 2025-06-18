@@ -1,0 +1,24 @@
+# Core library for using the Assistants API structure
+openai
+
+# The Python client for interacting with the Ollama service
+ollama
+
+# For creating the backend web server that provides tools to the agent
+fastapi
+
+# The server needed to run a FastAPI application
+uvicorn[standard]
+
+# For managing environment variables (API keys, URLs) from a .env file
+python-dotenv
+
+# For making HTTP requests from your agent script to your tool server
+requests
+
+# For data validation, often used with FastAPI
+pydantic
+
+# The official driver for connecting to the MongoDB database
+pymongo
+
