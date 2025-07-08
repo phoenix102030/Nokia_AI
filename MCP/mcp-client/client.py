@@ -7,14 +7,14 @@ import os
 import sys
 import json
 import re
-import ast # Import the Abstract Syntax Tree module for safe parsing
+import ast  # Import the Abstract Syntax Tree module for safe parsing
 from dotenv import load_dotenv
 from fastmcp.client import Client
 from mcp.types import TextContent
 from openai import OpenAI
 
 # Allow importing from the parent directory to access the 'shared' folder
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'shared'))
+sys.path.append(os.path.join(os.path.dirname(__file__), "..", "shared"))
 from tools import AVAILABLE_TOOLS_SCHEMA, TOOL_IMPLEMENTATIONS
 
 # --- Configuration ---
@@ -24,40 +24,48 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 
 if not all([FMC_SERVER_URL, OLLAMA_BASE_URL, OLLAMA_MODEL]):
-    raise ValueError("Please check MCP_SERVER_URL, OLLAMA_BASE_URL, and OLLAMA_MODEL in your .env file.")
+    raise ValueError(
+        "Please check MCP_SERVER_URL, OLLAMA_BASE_URL, and OLLAMA_MODEL in your .env file."
+    )
 
-# --- System Prompt ---
+# --- System Prompt (Modified for Clarity and Reliability) ---
 SYSTEM_PROMPT = f"""
-You are an expert agent that translates a user's natural language request into a specific tool call.
-Your ONLY output must be a single line of text in the format: `tool_name(argument_name="argument_value", ...)`
+You are an expert agent that translates a user's natural language request into a specific tool call OR provides a direct answer.
 
-Here are the available tools:
+- If the user’s request can be answered directly (e.g., a greeting, asking about your capabilities), your response should be **only the natural language answer itself**.
+- Otherwise, your response must be **only a single tool call** in the format: tool_name(argument_name="argument_value", ...)
+
+**Do not include any other text, think, explanation, or markdown formatting in your response.**
+
+--- AVAILABLE TOOLS ---
 {json.dumps(AVAILABLE_TOOLS_SCHEMA, indent=2, ensure_ascii=False)}
 
 --- EXAMPLES ---
+User request: "hi, what can you do?"
+Your response: I can list MongoDB databases, collections or query documents on your behalf. Just ask me a query.
+
 User request: "how many collections are in the traffic_data database?"
 Your response: list_collections(database_name="traffic_data")
 
-User request: "hi, what can you do?"
-Your response: no_op(reason="User is asking a general question.")
-
 User request: "count the records in the lane_data collection in the traffic_data database"
-Your response: count_documents(database_name="traffic_data", collection_name="lane_data", filter={{}})
+Your response: find(database_name="traffic_data", collection_name="lane_data", filter={{}}, limit=0)
 --- END EXAMPLES ---
 """
+
 
 # --- Client Initialization ---
 fastmcp_client = Client(FMC_SERVER_URL)
 ollama_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama")
 
+
 def parse_llm_tool_call(response_str: str) -> dict:
-    """
-    A robust parser for the LLM's string output, e.g., 'tool_name(arg1="val1", arg2={{...}})'
-    """
     try:
         match = re.match(r"(\w+)\((.*)\)", response_str.strip())
         if not match:
-            return {"tool_name": "error", "arguments": {"message": "Invalid tool call format from LLM."}}
+            return {
+                "tool_name": "error",
+                "arguments": {"message": "Invalid tool call format from LLM."},
+            }
 
         tool_name = match.group(1)
         args_str = match.group(2)
@@ -65,21 +73,25 @@ def parse_llm_tool_call(response_str: str) -> dict:
 
         if args_str:
             # This regex correctly finds key=value pairs, even with nested structures.
-            # It looks for a key, an equals sign, and then captures a value that is either
-            # a dictionary literal, a quoted string, or a number.
-            arg_pairs = re.findall(r'(\w+)\s*=\s*({.*?}|".*?"|\'.*?\'|[\d.-]+)', args_str)
+            arg_pairs = re.findall(
+                r'(\w+)\s*=\s*({.*?}|".*?"|\'.*?\'|[\d.-]+)', args_str
+            )
             for key, value in arg_pairs:
                 # ast.literal_eval safely converts the string representation of a Python
-                # literal (like "hello", '{"a":1}', or 123) into the actual object.
+                # literal into the actual object.
                 arguments[key.strip()] = ast.literal_eval(value)
-        
+
         return {"tool_name": tool_name, "arguments": arguments}
     except Exception as e:
-        return {"tool_name": "error", "arguments": {"message": f"Failed to parse tool call string: '{response_str}'. Error: {e}"}}
+        return {
+            "tool_name": "error",
+            "arguments": {
+                "message": f"Failed to parse tool call string: '{response_str}'. Error: {e}"
+            },
+        }
 
 
 def get_clean_response(response: list) -> str:
-    """Helper to format the server's response nicely."""
     if not response or not isinstance(response[0], TextContent):
         return "Received an unexpected response format."
     content = response[0].text
@@ -89,38 +101,48 @@ def get_clean_response(response: list) -> str:
     except json.JSONDecodeError:
         return content
 
+
 async def process_natural_language_query(user_query: str):
-    """The main logic loop: LLM decides, client executes."""
     print("\n🧠 Asking Qwen3 to decide which tool to use...")
     try:
         response = ollama_client.chat.completions.create(
             model=OLLAMA_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_query}
+                {"role": "user", "content": user_query},
             ],
-            temperature=0.0
+            temperature=0.0,
         )
-        full_llm_output = response.choices[0].message.content
+        full_llm_output = response.choices[0].message.content.strip()
         print(f"💡 LLM raw output:\n{full_llm_output}")
 
-        tool_call_match = re.search(r"\w+\(.*\)", full_llm_output, re.DOTALL)
-        
-        if not tool_call_match:
-            print("🤖 Agent Response: I could not extract a valid tool call from the response.")
-            return
+        cleaned_output = re.sub(
+            r"<think>.*?</think>", "", full_llm_output, flags=re.DOTALL
+        ).strip()
 
+        # Try to find a tool call anywhere in the response
+        tool_call_match = re.search(r"\w+\(.*\)", full_llm_output, re.DOTALL)
+
+        # *** MODIFIED LOGIC: Handle both direct answers and tool calls ***
+        if not tool_call_match:
+            # If no tool call is found, assume it's a direct answer and print it.
+            print(f"🤖 Agent Response:\n{cleaned_output}")
+            return  # Successfully handled, so we exit the function.
+
+        # If a tool call WAS found, proceed with extraction and execution.
         tool_call_str = tool_call_match.group(0)
         print(f"✅ Extracted tool call: {tool_call_str}")
-        
+
         tool_call = parse_llm_tool_call(tool_call_str)
         tool_name = tool_call.get("tool_name")
         arguments = tool_call.get("arguments", {})
 
         if not tool_name or tool_name == "error":
-             error_message = arguments.get("message", "Could not decide which tool to use or failed to parse arguments.")
-             print(f"🤖 Agent Response: {error_message}")
-             return
+            error_message = arguments.get(
+                "message", "Could not decide which tool to use or failed to parse arguments."
+            )
+            print(f"🤖 Agent Response: {error_message}")
+            return
 
         if tool_name == "no_op":
             no_op_response = await TOOL_IMPLEMENTATIONS["no_op"](**arguments)
@@ -132,10 +154,13 @@ async def process_natural_language_query(user_query: str):
             clean_result = get_clean_response(server_response)
             print(f"🤖 Final Result:\n{clean_result}")
         else:
-            print(f"🤖 Agent Response: The LLM chose a tool ('{tool_name}') that is not implemented.")
+            print(
+                f"🤖 Agent Response: The LLM chose a tool ('{tool_name}') that is not implemented."
+            )
 
     except Exception as e:
         print(f"\n❌ An error occurred during processing: {e}")
+
 
 async def main():
     """Runs the interactive chat loop."""
@@ -154,6 +179,7 @@ async def main():
     except Exception as e:
         print(f"\n❌ A connection error occurred: {e}")
         print("   Please ensure your FastMCP server and Ollama are running.")
+
 
 if __name__ == "__main__":
     try:
