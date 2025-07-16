@@ -90,6 +90,38 @@ AVAILABLE_TOOLS_SCHEMA = [
             },
             "required": ["collection_name", "metric_field", "id_value"]
         }
+    },
+    {
+        "name": "aggregate_time_series",
+        "description": "Calculates the average of a metric over specified time intervals (e.g., '15T' for 15 minutes, '1H' for 1 hour). This is useful for smoothing data to see trends.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "collection_name": {"type": "string", "enum": ["lane_data", "measurements"]},
+                "metric_field": {"type": "string", "description": "The field to aggregate, e.g., 'flow', 'speed'."},
+                "id_value": {"type": "string", "description": "The specific lane_id or source_id to filter by."},
+                "start_time": {"type": "string", "description": "The start of the time window in ISO format."},
+                "end_time": {"type": "string", "description": "The end of the time window in ISO format."},
+                "resample_window": {"type": "string", "description": "The time interval for resampling, e.g., '15T' (15 min), '1H' (1 hour), '1D' (1 day)."}
+            },
+            "required": ["collection_name", "metric_field", "id_value", "start_time", "end_time", "resample_window"]
+        }
+    },
+    {
+        "name": "find_peak_periods",
+        "description": "Finds timestamps where a traffic metric (like vehicle 'count' or 'density') exceeds a specified threshold.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "collection_name": {"type": "string", "enum": ["lane_data", "measurements"]},
+                "metric_field": {"type": "string", "description": "The field to check against the threshold, e.g., 'count' or 'density'."},
+                "id_value": {"type": "string", "description": "The specific lane_id or source_id to analyze."},
+                "threshold": {"type": "number", "description": "The value which the metric must exceed to be considered a peak."},
+                "start_time": {"type": "string", "description": "The start of the time window."},
+                "end_time": {"type": "string", "description": "The end of the time window."}
+            },
+            "required": ["collection_name", "metric_field", "id_value", "threshold", "start_time", "end_time"]
+        }
     }
 ]
 
@@ -191,10 +223,50 @@ async def plot_time_series(collection_name: str, metric_field: str, id_value: st
     
     return json.dumps({"status": "success", "plot_path": file_path})
 
+async def aggregate_time_series(collection_name: str, metric_field: str, id_value: str, start_time: str, end_time: str, resample_window: str) -> str:
+    """Calculates and returns time-series data resampled to a new interval."""
+    print(f"🛠️ Executing 'aggregate_time_series' for ID '{id_value}' with window '{resample_window}'")
+    id_field = "metadata.source_id" if collection_name == "measurements" else "metadata.lane_id"
+    full_metric_field = f"measurement.{metric_field}"
+    filter_query = {id_field: id_value, "timestamp": {"$gte": start_time, "$lte": end_time}}
+    df = await _fetch_data_as_dataframe(collection_name, filter_query)
+    if df is None or df.empty:
+        return json.dumps({"error": "No data found for the specified criteria."})
+    if full_metric_field not in df.columns:
+        return json.dumps({"error": f"Metric '{metric_field}' not found."})
+    resampled_data = df[full_metric_field].resample(resample_window).mean()
+    result_dict = {ts.isoformat(): val for ts, val in resampled_data.items()}
+    return json.dumps(result_dict, default=json_encoder)
+
+async def find_peak_periods(collection_name: str, metric_field: str, id_value: str, threshold: float, start_time: str, end_time: str) -> str:
+    """Finds timestamps where a metric exceeds a given threshold."""
+    print(f"🛠️ Executing 'find_peak_periods' for ID '{id_value}' with threshold {threshold}")
+    id_field = "metadata.source_id" if collection_name == "measurements" else "metadata.lane_id"
+    full_metric_field = f"measurement.{metric_field}"
+    filter_query = {
+        id_field: id_value,
+        "timestamp": {"$gte": start_time, "$lte": end_time}
+    }
+    df = await _fetch_data_as_dataframe(collection_name, filter_query)
+    if df is None or df.empty:
+        return json.dumps({"message": "No data found for this period."})
+    if full_metric_field not in df.columns:
+        return json.dumps({"error": f"Metric '{metric_field}' not found."})
+    
+    peak_df = df[df[full_metric_field] > threshold]
+    
+    if peak_df.empty:
+        return json.dumps({"message": "No peak periods found matching the criteria."})
+        
+    peak_times = [ts.isoformat() for ts in peak_df.index.to_list()]
+    return json.dumps({"peak_timestamps": peak_times})
+
 # --- 4. TOOL MAPPING ---
 # This dictionary maps the string names to the actual Python functions.
 TOOL_IMPLEMENTATIONS = {
     "get_daily_traffic_profile": get_daily_traffic_profile,
     "plot_time_series": plot_time_series,
     "get_descriptive_stats": get_descriptive_stats,
+    "aggregate_time_series": aggregate_time_series,
+    "find_peak_periods": find_peak_periods
 }
