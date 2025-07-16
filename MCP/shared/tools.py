@@ -1,165 +1,200 @@
-# shared/tools.py
-# All-in-one definition center for shared MongoDB tools.
+# tools.py
+# Final version of the data analysis tools with smarter, more flexible functions.
 
-import motor.motor_asyncio
 import os
 import json
 from bson import ObjectId
+import motor.motor_asyncio
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
-# --- Database Connection ---
+# Required libraries: pip install "pandas" "numpy" "matplotlib" "seaborn"
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# --- 1. SETUP: DATABASE CONNECTION ---
 MONGO_URI = os.getenv("MCP_MONGODB_URI", "mongodb://localhost:27017")
-client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+DB_NAME = "traffic_data" 
 
+try:
+    client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+    db = client[DB_NAME]
+    print(f"✅ Tools: Successfully connected to MongoDB at {MONGO_URI}")
+except Exception as e:
+    print(f"❌ Tools ERROR: Could not connect to MongoDB. Details: {e}")
+    db = None
+
+# --- Helper Function for JSON serialization ---
 def json_encoder(obj):
-    """Custom JSON encoder to handle MongoDB's ObjectId."""
+    """Custom JSON encoder to handle special data types from MongoDB and numpy."""
     if isinstance(obj, ObjectId):
         return str(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (datetime, pd.Timestamp)):
+        return obj.isoformat()
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
-# --- Tool Schemas (The "Manual" for the LLM) ---
+
+# --- 2. TOOL SCHEMAS (The "Manual" for the LLM) ---
 AVAILABLE_TOOLS_SCHEMA = [
     {
-        "name": "no_op",
-        "description": "Call this tool when the user is not asking a question about the database but is just chatting or asking what you can do.",
+        "name": "get_daily_traffic_profile",
+        "description": "Calculates the typical hourly profile for a metric (e.g., speed, density) for a specific lane, automatically separating results by Weekday and Weekend. This is the best tool for understanding typical daily patterns or peak times.",
         "parameters": {
             "type": "object",
             "properties": {
-                "reason": {"type": "string", "description": "The reason for not calling a database tool."}
-            },
-            "required": ["reason"]
-        }
-    },
-    {
-        "name": "get_database_schema",
-        "description": "Scans the entire MongoDB instance and returns a list of all databases and the collections within each one. Use this for broad questions about what data is available.",
-        "parameters": {"type": "object", "properties": {}}
-    },
-    {
-        "name": "find",
-        "description": (
-            "Finds documents in a collection. IMPORTANT: In the 'lane_data' collection, "
-            "'timestamp' is a top-level field, but 'lane_id' is nested inside 'metadata'. "
-            "Also, 'lane_id' values may start with a colon ':'. "
-            "Example filter: {'timestamp': '...', 'metadata.lane_id': ':...'}"
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "database_name": {
+                "lane_id": {
                     "type": "string",
-                    "description": "The database name, e.g., 'traffic_data'."
+                    "description": "The specific lane_id to analyze from the 'lane_data' collection, e.g., ':13445139_0'."
                 },
-                "collection_name": {
+                "metric_field": {
                     "type": "string",
-                    "description": "The collection name, e.g., 'lane_data' or 'measurements'."
-                },
-                "filter": {
-                    "type": "object",
-                    "description": "The query filter. Defaults to {} to find all.",
-                    "default": {}
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "The maximum number of documents to return.",
-                    "default": 5
+                    "description": "The measurement field to analyze, e.g., 'speed', 'density'."
                 }
             },
-            "required": ["database_name", "collection_name"]
+            "required": ["lane_id", "metric_field"]
         }
     },
     {
-        "name": "get_lane_summary",
-        "description": "Calculates the average speed, density, and time loss for a specific lane_id from the 'lane_data' collection.",
+        "name": "plot_time_series",
+        "description": "Generates and saves a line plot of a specific metric over a time range for a given ID. If no time range is given, it plots all available data. Returns the file path of the saved image.",
         "parameters": {
             "type": "object",
             "properties": {
-                "database_name": {"type": "string", "description": "The database containing lane data, e.g., 'traffic_data'."},
-                "metadata.lane_id": {"type": "string", "description": "The specific lane_id to summarize, e.g., '13445139_0' or ':13445139_0'."}
+                "collection_name": {"type": "string", "enum": ["lane_data", "measurements"]},
+                "metric_field": {"type": "string", "description": "The numeric field to plot, e.g., 'speed', 'flow'."},
+                "id_value": {"type": "string", "description": "The specific lane_id or source_id to filter by."},
+                "start_time": {"type": "string", "description": "Optional start of the time window in ISO format."},
+                "end_time": {"type": "string", "description": "Optional end of the time window in ISO format."}
             },
-            "required": ["database_name", "lane_id"]
+            "required": ["collection_name", "metric_field", "id_value"]
+        }
+    },
+    {
+        "name": "get_descriptive_stats",
+        "description": "Calculates descriptive statistics for a metric. If no time range is given, it analyzes all data for that ID. Use 'lane_data' for lanes or 'measurements' for detectors.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "collection_name": {"type": "string", "enum": ["lane_data", "measurements"]},
+                "metric_field": {"type": "string", "description": "The field to analyze, e.g., 'speed', 'density', 'count'."},
+                "id_value": {"type": "string", "description": "The specific lane_id or source_id to filter by."},
+                "start_time": {"type": "string", "description": "Optional start of the time window in ISO format."},
+                "end_time": {"type": "string", "description": "Optional end of the time window in ISO format."}
+            },
+            "required": ["collection_name", "metric_field", "id_value"]
         }
     }
 ]
 
-# --- Tool Implementations (Python Functions) ---
+# --- 3. TOOL IMPLEMENTATIONS (The Actual Python Code) ---
 
-async def no_op(reason: str) -> str:
-    """A dummy function that just returns a helpful message."""
-    print(f"🛠️ Tool 'no_op' called. Reason: {reason}")
-    return json.dumps({
-        "message": "I can help you query the traffic database. You can ask me to 'get the database schema', 'find documents', or 'get a summary for a specific lane'."
-    })
-
-async def get_database_schema() -> str:
-    """
-    A multi-step tool that lists all databases and their respective collections.
-    """
-    print("🛠️ Executing complex tool 'get_database_schema'")
-    schema = {}
-    # Exclude system databases that are not relevant to the user
-    system_dbs = ["admin", "config", "local"]
-    try:
-        db_names = await client.list_database_names()
-        for db_name in db_names:
-            if db_name not in system_dbs:
-                db = client[db_name]
-                collections = await db.list_collection_names()
-                schema[db_name] = collections
-        return json.dumps(schema)
-    except Exception as e:
-        return json.dumps({"error": f"Failed to retrieve database schema: {e}"})
-
-
-async def find(database_name: str, collection_name: str, filter: dict = {}, limit: int = 5) -> str:
-    """Finds documents in a collection based on a query."""
-    print(f"🛠️ Executing 'find' on '{database_name}.{collection_name}' with filter {filter}")
-    db = client[database_name]
+async def _fetch_data_as_dataframe(collection_name: str, filter_query: dict) -> pd.DataFrame | None:
+    """Helper function to fetch data and convert it to a pandas DataFrame."""
+    if db is None: return None
     collection = db[collection_name]
-    documents = []
-    # A limit of 0 means no limit.
-    cursor = collection.find(filter)
-    if limit > 0:
-        cursor = cursor.limit(limit)
+    cursor = collection.find(filter_query)
+    documents = await cursor.to_list(length=None)
+    if not documents:
+        return pd.DataFrame()
+    df = pd.json_normalize(documents)
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df.set_index('timestamp', inplace=True)
+    df.sort_index(inplace=True)
+    return df
 
-    for doc in await cursor.to_list(length=limit if limit > 0 else None):
-        documents.append(doc)
-    return json.dumps(documents, default=json_encoder)
-
-async def get_lane_summary(database_name: str, lane_id: str) -> str:
-    """
-    Calculates an aggregate summary for a specific lane.
-    This function is now robust and handles lane_ids with or without a leading colon.
-    """
-    print(f"🛠️ Executing 'get_lane_summary' for lane_id '{lane_id}'")
+async def get_daily_traffic_profile(lane_id: str, metric_field: str) -> str:
+    """Analyzes the entire dataset for a lane to build a typical weekday/weekend profile."""
+    print(f"🛠️ Executing 'get_daily_traffic_profile' for lane '{lane_id}' on metric '{metric_field}'")
+    full_metric_field = f"measurement.{metric_field}"
     
-    id_with_colon = lane_id if lane_id.startswith(':') else f":{lane_id}"
-    id_without_colon = lane_id.lstrip(':')
-
-    db = client[database_name]
-    collection = db["lane_data"]
+    # Fetch ALL data for the given lane, with no time filter
+    df = await _fetch_data_as_dataframe("lane_data", {"metadata.lane_id": lane_id})
     
-    pipeline = [
-        {'$match': {
-            '$or': [
-                {'metadata.lane_id': id_with_colon},
-                {'metadata.lane_id': id_without_colon}
-            ]
-        }},
-        {'$group': {
-            '_id': '$metadata.lane_id',
-            'avg_speed': {'$avg': '$measurement.speed'},
-            'avg_density': {'$avg': '$measurement.density'},
-            'avg_time_loss': {'$avg': '$measurement.time_loss'},
-            'record_count': {'$sum': 1}
-        }}
-    ]
-    result = await collection.aggregate(pipeline).to_list(length=1)
-    return json.dumps(result, default=json_encoder)
+    if df is None or df.empty:
+        return json.dumps({"error": f"No data found for lane_id '{lane_id}'."})
+    if full_metric_field not in df.columns:
+        return json.dumps({"error": f"Metric '{metric_field}' not found."})
 
-# --- Tool Mapping ---
+    # Add columns for hour of day and day type (Monday=0, Sunday=6)
+    df['hour'] = df.index.hour
+    df['day_type'] = np.where(df.index.dayofweek < 5, 'Weekday', 'Weekend')
+
+    # Group by day type and hour, then calculate the mean of the metric
+    profile = df.groupby(['day_type', 'hour'])[full_metric_field].mean().unstack(level=0)
+    
+    result_dict = profile.to_dict()
+    print(f"   -> Successfully generated profile.")
+    return json.dumps(result_dict, default=json_encoder)
+
+async def get_descriptive_stats(collection_name: str, metric_field: str, id_value: str, start_time: str = None, end_time: str = None) -> str:
+    """Calculates descriptive statistics. If start/end times are None, analyzes the whole dataset for the ID."""
+    print(f"🛠️ Executing 'get_descriptive_stats' for ID '{id_value}' on metric '{metric_field}'")
+    id_field = "metadata.source_id" if collection_name == "measurements" else "metadata.lane_id"
+    full_metric_field = f"measurement.{metric_field}"
+    
+    filter_query = {id_field: id_value}
+    if start_time and end_time:
+        filter_query["timestamp"] = {"$gte": start_time, "$lte": end_time}
+    
+    df = await _fetch_data_as_dataframe(collection_name, filter_query)
+    
+    if df is None or df.empty:
+        return json.dumps({"error": "No data found for the specified criteria."})
+    if full_metric_field not in df.columns:
+        return json.dumps({"error": f"Metric '{metric_field}' not found in '{collection_name}'."})
+
+    stats = df[full_metric_field].describe(percentiles=[.05, .25, .5, .75, .95]).to_dict()
+    return json.dumps(stats, default=json_encoder)
+
+async def plot_time_series(collection_name: str, metric_field: str, id_value: str, start_time: str = None, end_time: str = None) -> str:
+    """Generates a plot and returns the file path."""
+    print(f"🛠️ Executing 'plot_time_series' for ID '{id_value}' on metric '{metric_field}'")
+    id_field = "metadata.source_id" if collection_name == "measurements" else "metadata.lane_id"
+    full_metric_field = f"measurement.{metric_field}"
+    
+    filter_query = {id_field: id_value}
+    if start_time and end_time:
+        filter_query["timestamp"] = {"$gte": start_time, "$lte": end_time}
+        
+    df = await _fetch_data_as_dataframe(collection_name, filter_query)
+    
+    if df is None or df.empty:
+        return json.dumps({"error": "No data found to plot."})
+    if full_metric_field not in df.columns:
+        return json.dumps({"error": f"Metric '{metric_field}' not found."})
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, ax = plt.subplots(figsize=(12, 6))
+    df[full_metric_field].plot(ax=ax, marker='o', linestyle='-')
+    ax.set_title(f'Time Series for {metric_field.title()} on ID: {id_value}')
+    ax.set_xlabel("Timestamp")
+    ax.set_ylabel(metric_field.title())
+    ax.tick_params(axis='x', rotation=45)
+    fig.tight_layout()
+
+    plots_dir = "plots"
+    if not os.path.exists(plots_dir):
+        os.makedirs(plots_dir)
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    file_path = os.path.join(plots_dir, f"{metric_field}_{id_value.replace(':', '')}_{timestamp_str}.png")
+    fig.savefig(file_path)
+    plt.close(fig)
+    print(f"   -> Plot saved to: {file_path}")
+    
+    return json.dumps({"status": "success", "plot_path": file_path})
+
+# --- 4. TOOL MAPPING ---
+# This dictionary maps the string names to the actual Python functions.
 TOOL_IMPLEMENTATIONS = {
-    "no_op": no_op,
-    "get_database_schema": get_database_schema,
-    "find": find,
-    "get_lane_summary": get_lane_summary,
+    "get_daily_traffic_profile": get_daily_traffic_profile,
+    "plot_time_series": plot_time_series,
+    "get_descriptive_stats": get_descriptive_stats,
 }

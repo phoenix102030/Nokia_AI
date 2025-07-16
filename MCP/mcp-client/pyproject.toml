@@ -10,4 +10,7 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "fastmcp>=2.9.2",
     "motor>=3.7",
+    "pandas==2.3.1",
+    "matplotlib==3.10.3",
+    "seaborn==0.13.2",
 ]
