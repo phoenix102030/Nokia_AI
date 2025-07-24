@@ -103,7 +103,7 @@ def get_clean_response(response: list) -> str:
 
 
 async def process_natural_language_query(user_query: str):
-    print("\n🧠 Asking Qwen3 to decide which tool to use...")
+    print("\n🧠 Asking AI Agent to decide which tool to use...")
     try:
         response = ollama_client.chat.completions.create(
             model=OLLAMA_MODEL,
